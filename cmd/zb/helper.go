@@ -8,10 +8,10 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,8 +25,10 @@ import (
 	"zotregistry.dev/zot/pkg/common"
 )
 
+const manifestAcceptHeader = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+
 func makeHTTPGetRequest(url string, resultPtr interface{}, client *resty.Client) (http.Header, error) {
-	resp, err := client.R().Get(url)
+	resp, err := client.R().SetHeader("Accept", manifestAcceptHeader).Get(url)
 	if err != nil {
 		return http.Header{}, err
 	}
@@ -74,37 +76,6 @@ func deleteTestRepo(repos []string, url string, client *resty.Client) error {
 			return err
 		}
 
-		for _, tag := range tags.Tags {
-			var manifest ispec.Manifest
-
-			// first get tag manifest to get containing blobs
-			header, err := makeHTTPGetRequest(fmt.Sprintf("%s/v2/%s/manifests/%s", url, repo, tag), &manifest, client)
-			if err != nil {
-				return err
-			}
-
-			manifestDigest := header.Get("Docker-Content-Digest")
-
-			// delete manifest so that we don't trigger BlobInUse error
-			err = makeHTTPDeleteRequest(fmt.Sprintf("%s/v2/%s/manifests/%s", url, repo, manifestDigest), client)
-			if err != nil {
-				return err
-			}
-
-			// delete blobs
-			for _, blob := range manifest.Layers {
-				err := makeHTTPDeleteRequest(fmt.Sprintf("%s/v2/%s/blobs/%s", url, repo, blob.Digest.String()), client)
-				if err != nil {
-					return err
-				}
-			}
-
-			// delete config blob
-			err = makeHTTPDeleteRequest(fmt.Sprintf("%s/v2/%s/blobs/%s", url, repo, manifest.Config.Digest.String()), client)
-			if err != nil {
-				return err
-			}
-		}
 	}
 
 	return nil
@@ -151,6 +122,7 @@ func pullAndCollect(url string, repos []string, manifestItem manifestStruct,
 			// check manifest
 			resp, err = client.R().
 				SetHeader("Content-Type", "application/vnd.oci.image.manifest.v1+json").
+				SetHeader("Accept", manifestAcceptHeader).
 				Head(manifestLoc)
 
 			latency = time.Since(start)
@@ -172,6 +144,7 @@ func pullAndCollect(url string, repos []string, manifestItem manifestStruct,
 			// send request and get the manifest
 			resp, err = client.R().
 				SetHeader("Content-Type", "application/vnd.oci.image.manifest.v1+json").
+				SetHeader("Accept", manifestAcceptHeader).
 				Get(manifestLoc)
 
 			latency = time.Since(start)
@@ -1055,20 +1028,29 @@ func getImageConfig() ([]byte, godigest.Digest) {
 	return configBlobContent, configBlobDigestRaw
 }
 
+//
+//func getLocation(baseURL string, resp *resty.Response) string {
+//	// For some API responses, the Location header is set and is supposed to
+//	// indicate an opaque value. However, it is not clear if this value is an
+//	// absolute URL (https://server:port/v2/...) or just a path (/v2/...)
+//	// zot implements the latter as per the spec, but some registries appear to
+//	// return the former - this needs to be clarified
+//	loc := resp.Header().Get("Location")
+//
+//	uloc, err := url.Parse(loc)
+//	if err != nil {
+//		return ""
+//	}
+//
+//	path := uloc.Path
+//
+//	return baseURL + path
+//}
+
 func getLocation(baseURL string, resp *resty.Response) string {
-	// For some API responses, the Location header is set and is supposed to
-	// indicate an opaque value. However, it is not clear if this value is an
-	// absolute URL (https://server:port/v2/...) or just a path (/v2/...)
-	// zot implements the latter as per the spec, but some registries appear to
-	// return the former - this needs to be clarified
 	loc := resp.Header().Get("Location")
-
-	uloc, err := url.Parse(loc)
-	if err != nil {
-		return ""
+	if strings.HasPrefix(loc, "http") {
+		return loc
 	}
-
-	path := uloc.Path
-
-	return baseURL + path
+	return baseURL + loc
 }
