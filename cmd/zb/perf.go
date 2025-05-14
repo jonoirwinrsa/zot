@@ -17,7 +17,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
 	godigest "github.com/opencontainers/go-digest"
 	"gopkg.in/resty.v1"
 
@@ -200,6 +199,7 @@ type cicdTestSummary struct {
 	Name          string  `json:"name"`
 	RPS           float32 `json:"rps"`
 	ThroughputMBs float32 `json:"throughputMBs"`
+	NumberOfReqs  int     `json:"numberOfReqs"`
 }
 
 type manifestStruct struct {
@@ -208,9 +208,9 @@ type manifestStruct struct {
 }
 
 //nolint:gochecknoglobals // used only in this test
-var cicdSummary = []cicdTestSummary{}
+var results = make(map[string]map[string]float32) // test name -> url -> throughputMBps
 
-func printStats(requests int, summary *statsSummary, config testConfig, outFmt string) {
+func printStats(requests int, summary *statsSummary, config testConfig, outFmt string, url string) {
 	log.Printf("============\n")
 	log.Printf("Test name:\t%s", summary.name)
 	log.Printf("Time taken for tests:\t%v", summary.total)
@@ -266,13 +266,11 @@ func printStats(requests int, summary *statsSummary, config testConfig, outFmt s
 
 	// ci/cd
 	if outFmt == cicdFmt {
-		cicdSummary = append(cicdSummary,
-			cicdTestSummary{
-				Name:          summary.name,
-				RPS:           summary.rps,
-				ThroughputMBs: summary.throughputMBps,
-			},
-		)
+		// Store result in in-memory map
+		if _, ok := results[summary.name]; !ok {
+			results[summary.name] = make(map[string]float32)
+		}
+		results[summary.name][url] = summary.throughputMBps
 	}
 }
 
@@ -580,7 +578,6 @@ func Perf(
 	concurrency int, requests int,
 	outFmt string, srcIPs string, srcCIDR string, skipCleanup bool,
 ) {
-	json := jsoniter.ConfigCompatibleWithStandardLibrary
 	// logging
 	log.SetFlags(0)
 	log.SetOutput(tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', tabwriter.TabIndent))
@@ -675,21 +672,64 @@ func Perf(
 
 		sort.Sort(Durations(summary.latencies))
 
-		printStats(requests, &summary, tconfig, outFmt)
+		printStats(requests, &summary, tconfig, outFmt, url)
 
 		if summary.errorCount != 0 && !zbError {
 			zbError = true
 		}
 	}
 
+	// After all tests, if cicdFmt, write CSV of results
 	if outFmt == cicdFmt {
-		jsonOut, err := json.Marshal(cicdSummary)
-		if err != nil {
-			log.Fatal(err) // file closed on exit
+		// Collect all URLs and test names
+		urlSet := make(map[string]struct{})
+		for _, urlMap := range results {
+			for u := range urlMap {
+				urlSet[u] = struct{}{}
+			}
+		}
+		var urls []string
+		for u := range urlSet {
+			urls = append(urls, u)
+		}
+		sort.Strings(urls)
+
+		var testNames []string
+		for tn := range results {
+			testNames = append(testNames, tn)
+		}
+		sort.Strings(testNames)
+
+		// Prepare CSV rows
+		var csvRows [][]string
+		header := append([]string{"Test Name"}, urls...)
+		csvRows = append(csvRows, header)
+		for _, tn := range testNames {
+			row := make([]string, 0, len(urls)+1)
+			row = append(row, tn)
+			for _, u := range urls {
+				val, ok := results[tn][u]
+				if ok {
+					row = append(row, fmt.Sprintf("%.2f", val))
+				} else {
+					row = append(row, "")
+				}
+			}
+			csvRows = append(csvRows, row)
 		}
 
-		if err := os.WriteFile(outFmt+".json", jsonOut, defaultFilePerms); err != nil {
+		// Write CSV file
+		// filename is url - https:// + ".csv"
+		urlOut := strings.TrimPrefix(url, "https://")
+		urlOut = strings.TrimPrefix(urlOut, "http://")
+		urlOut = strings.ReplaceAll(urlOut, "/", "_")
+		f, err := os.Create(urlOut + ".csv")
+		if err != nil {
 			log.Fatal(err)
+		}
+		defer f.Close()
+		for _, row := range csvRows {
+			fmt.Fprintln(f, strings.Join(row, ","))
 		}
 	}
 
