@@ -50,22 +50,6 @@ func makeHTTPGetRequest(url string, resultPtr interface{}, client *resty.Client)
 	return header, nil
 }
 
-func makeHTTPDeleteRequest(url string, client *resty.Client) error {
-	resp, err := client.R().Delete(url)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode() != http.StatusAccepted {
-		log.Printf("unable to make DELETE request on %s, response status code: %d", url, resp.StatusCode())
-
-		return fmt.Errorf("%w: Expected: %d, Got: %d, Body: '%s'", zerr.ErrBadHTTPStatusCode, http.StatusAccepted,
-			resp.StatusCode(), string(resp.Body()))
-	}
-
-	return nil
-}
-
 func deleteTestRepo(repos []string, url string, client *resty.Client) error {
 	for _, repo := range repos {
 		var tags common.ImageTags
@@ -85,7 +69,6 @@ func pullAndCollect(url string, repos []string, manifestItem manifestStruct,
 	config testConfig, client *resty.Client, statsCh chan statsRecord,
 ) []string {
 	manifestHash := manifestItem.manifestHash
-	manifestBySizeHash := manifestItem.manifestBySizeHash
 
 	func() {
 		start := time.Now()
@@ -107,12 +90,6 @@ func pullAndCollect(url string, repos []string, manifestItem manifestStruct,
 				err:        err,
 			}
 		}()
-
-		if config.mixedSize {
-			_, idx := getRandomSize(config.probabilityRange)
-
-			manifestHash = manifestBySizeHash[idx]
-		}
 
 		for repo, manifestTag := range manifestHash {
 			manifestLoc := fmt.Sprintf("%s/v2/%s/manifests/%s", url, repo, manifestTag)
@@ -716,11 +693,7 @@ func pushChunkAndCollect(workdir, url, trepo string, count int,
 
 		var size int
 
-		if config.mixedSize {
-			size, _ = getRandomSize(config.probabilityRange)
-		} else {
-			size = config.size
-		}
+		size = config.size
 
 		blob := path.Join(workdir, fmt.Sprintf("%d.blob", size))
 

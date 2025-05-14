@@ -125,6 +125,7 @@ type statsSummary struct {
 	min, max, total      time.Duration
 	statusHist           map[string]int
 	rps                  float32
+	throughputMBps       float32
 	mixedSize, mixedType bool
 	errorCount           int
 	errors               map[string]int
@@ -196,10 +197,9 @@ func updateStats(summary *statsSummary, record statsRecord) {
 }
 
 type cicdTestSummary struct {
-	Name  string      `json:"name"`
-	Unit  string      `json:"unit"`
-	Value interface{} `json:"value"`
-	Range string      `json:"range,omitempty"`
+	Name          string  `json:"name"`
+	RPS           float32 `json:"rps"`
+	ThroughputMBs float32 `json:"throughputMBs"`
 }
 
 type manifestStruct struct {
@@ -210,11 +210,15 @@ type manifestStruct struct {
 //nolint:gochecknoglobals // used only in this test
 var cicdSummary = []cicdTestSummary{}
 
-func printStats(requests int, summary *statsSummary, outFmt string) {
+func printStats(requests int, summary *statsSummary, config testConfig, outFmt string) {
 	log.Printf("============\n")
 	log.Printf("Test name:\t%s", summary.name)
 	log.Printf("Time taken for tests:\t%v", summary.total)
 	log.Printf("Requests per second:\t%v", summary.rps)
+	if summary.total > 0 {
+		summary.throughputMBps = float32(requests) * float32(config.size) / float32(MiB) / float32(summary.total.Seconds())
+	}
+	log.Printf("Throughput MB/s:\t%v", summary.throughputMBps)
 	log.Printf("Complete requests:\t%v", requests-summary.errorCount)
 	log.Printf("Failed requests:\t%v", summary.errorCount)
 
@@ -264,10 +268,9 @@ func printStats(requests int, summary *statsSummary, outFmt string) {
 	if outFmt == cicdFmt {
 		cicdSummary = append(cicdSummary,
 			cicdTestSummary{
-				Name:  summary.name,
-				Unit:  "requests per sec",
-				Value: summary.rps,
-				Range: "3",
+				Name:          summary.name,
+				RPS:           summary.rps,
+				ThroughputMBs: summary.throughputMBps,
 			},
 		)
 	}
@@ -508,56 +511,6 @@ func Pull(
 	return nil
 }
 
-func MixedPullAndPush(
-	workdir, url, trepo string,
-	requests int,
-	config testConfig,
-	statsCh chan statsRecord,
-	client *resty.Client,
-	skipCleanup bool,
-) error {
-	var repos []string
-
-	statusRequests = sync.Map{}
-
-	// Push blob given size
-	manifestHash, repos, err := pushMonolithImage(workdir, url, trepo, repos, config, client)
-	if err != nil {
-		return err
-	}
-
-	manifestItem := manifestStruct{
-		manifestHash: manifestHash,
-	}
-
-	for count := 0; count < requests; count++ {
-		idx := flipFunc(config.probabilityRange)
-
-		readTestIdx := 0
-		writeTestIdx := 1
-
-		if idx == readTestIdx {
-			repos = pullAndCollect(url, repos, manifestItem, config, client, statsCh)
-			current := loadOrStore(&statusRequests, "Pull", 0)
-			statusRequests.Store("Pull", current+1)
-		} else if idx == writeTestIdx {
-			repos = pushMonolithAndCollect(workdir, url, trepo, count, repos, config, client, statsCh)
-			current := loadOrStore(&statusRequests, "Push", 0)
-			statusRequests.Store("Pull", current+1)
-		}
-	}
-
-	// clean up
-	if !skipCleanup {
-		err = deleteTestRepo(repos, url, client)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 // test driver.
 
 type testConfig struct {
@@ -619,45 +572,6 @@ var testSuite = []testConfig{ //nolint:gochecknoglobals // used only in this tes
 		name:  "Pull 100MB",
 		tfunc: Pull,
 		size:  largeBlob,
-	},
-	{
-		name:             "Pull Mixed 20% 1MB, 70% 10MB, 10% 100MB",
-		tfunc:            Pull,
-		probabilityRange: normalizeProbabilityRange([]float64{0.2, 0.7, 0.1}),
-		mixedSize:        true,
-	},
-	{
-		name:             "Push Monolith Mixed 20% 1MB, 70% 10MB, 10% 100MB",
-		tfunc:            PushMonolithStreamed,
-		probabilityRange: normalizeProbabilityRange([]float64{0.2, 0.7, 0.1}),
-		mixedSize:        true,
-	},
-	{
-		name:             "Push Chunk Mixed 33% 1MB, 33% 10MB, 33% 100MB",
-		tfunc:            PushChunkStreamed,
-		probabilityRange: normalizeProbabilityRange([]float64{0.33, 0.33, 0.33}),
-		mixedSize:        true,
-	},
-	{
-		name:             "Pull 75% and Push 25% Mixed 1MB",
-		tfunc:            MixedPullAndPush,
-		size:             smallBlob,
-		mixedType:        true,
-		probabilityRange: normalizeProbabilityRange([]float64{0.75, 0.25}),
-	},
-	{
-		name:             "Pull 75% and Push 25% Mixed 10MB",
-		tfunc:            MixedPullAndPush,
-		size:             mediumBlob,
-		mixedType:        true,
-		probabilityRange: normalizeProbabilityRange([]float64{0.75, 0.25}),
-	},
-	{
-		name:             "Pull 75% and Push 25% Mixed 100MB",
-		tfunc:            MixedPullAndPush,
-		size:             largeBlob,
-		mixedType:        true,
-		probabilityRange: normalizeProbabilityRange([]float64{0.75, 0.25}),
 	},
 }
 
@@ -761,7 +675,7 @@ func Perf(
 
 		sort.Sort(Durations(summary.latencies))
 
-		printStats(requests, &summary, outFmt)
+		printStats(requests, &summary, tconfig, outFmt)
 
 		if summary.errorCount != 0 && !zbError {
 			zbError = true

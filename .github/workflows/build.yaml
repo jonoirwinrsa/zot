@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [linux, darwin, freebsd, windows]
+        os: [linux, darwin]
         arch: [amd64, arm64]
     steps:
       - name: Check out source code
@@ -76,7 +76,7 @@ jobs:
         run: |
           echo "Building for $OS:$ARCH"
           cd $GITHUB_WORKSPACE
-          make binary binary-minimal binary-debug cli bench exporter-minimal
+          make bench
         env:
           OS: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
@@ -89,8 +89,7 @@ jobs:
           curl -X POST -H "Content-Type: application/json" -d @.pkg/debug/githubWorkflows/introspection-query.json http://localhost:5000/v2/_zot/ext/search | jq > bin/zot-gql-introspection-result.json
           pkill zot
 
-      - if: github.event_name == 'release' && github.event.action == 'published'
-        name: Publish artifacts on releases
+      - name: Publish artifacts on releases
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
@@ -102,7 +101,6 @@ jobs:
   release-checksums:
     name: Release Artifact Checksums
     needs: build-arch
-    if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: ubuntu-latest
     permissions:
       contents: write
