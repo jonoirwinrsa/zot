@@ -681,7 +681,16 @@ func Perf(
 
 	// After all tests, if cicdFmt, write CSV of results
 	if outFmt == cicdFmt {
-		// Collect all URLs and test names
+		// Prepare CSV header and row (flipped layout: URL as row, test names as columns)
+
+		// Ensure we know all test names from the testSuite
+		var testNames []string
+		for _, t := range testSuite {
+			testNames = append(testNames, t.name)
+		}
+		sort.Strings(testNames)
+
+		// Collect all URLs
 		urlSet := make(map[string]struct{})
 		for _, urlMap := range results {
 			for u := range urlMap {
@@ -694,20 +703,31 @@ func Perf(
 		}
 		sort.Strings(urls)
 
-		var testNames []string
-		for tn := range results {
-			testNames = append(testNames, tn)
-		}
-		sort.Strings(testNames)
+		filename := "all_results.csv"
+		var file *os.File
+		if _, err := os.Stat(filename); os.IsNotExist(err) {
+			// Create and write header
+			file, err = os.Create(filename)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer file.Close()
 
-		// Prepare CSV rows
-		var csvRows [][]string
-		header := append([]string{"Test Name"}, urls...)
-		csvRows = append(csvRows, header)
-		for _, tn := range testNames {
-			row := make([]string, 0, len(urls)+1)
-			row = append(row, tn)
-			for _, u := range urls {
+			header := append([]string{"URL"}, testNames...)
+			fmt.Fprintln(file, strings.Join(header, ","))
+		} else {
+			// Open file in append mode
+			file, err = os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, defaultFilePerms)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer file.Close()
+		}
+
+		for _, u := range urls {
+			row := make([]string, 0, len(testNames)+1)
+			row = append(row, u)
+			for _, tn := range testNames {
 				val, ok := results[tn][u]
 				if ok {
 					row = append(row, fmt.Sprintf("%.2f", val))
@@ -715,21 +735,7 @@ func Perf(
 					row = append(row, "")
 				}
 			}
-			csvRows = append(csvRows, row)
-		}
-
-		// Write CSV file
-		// filename is url - https:// + ".csv"
-		urlOut := strings.TrimPrefix(url, "https://")
-		urlOut = strings.TrimPrefix(urlOut, "http://")
-		urlOut = strings.ReplaceAll(urlOut, "/", "_")
-		f, err := os.Create(urlOut + ".csv")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer f.Close()
-		for _, row := range csvRows {
-			fmt.Fprintln(f, strings.Join(row, ","))
+			fmt.Fprintln(file, strings.Join(row, ","))
 		}
 	}
 
